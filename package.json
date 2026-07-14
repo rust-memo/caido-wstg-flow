@@ -1,0 +1,35 @@
+{
+  "name": "caido-wstg-flow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Project-aware OWASP WSTG checklist, passive candidate discovery, evidence verification, and reporting for Caido",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rust-memo/caido-wstg-flow.git"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "lint": "eslint ./packages/**/src",
+    "lint:fix": "eslint ./packages/**/src --fix",
+    "knip": "knip",
+    "build": "caido-dev build",
+    "watch": "caido-dev watch"
+  },
+  "devDependencies": {
+    "@caido-community/dev": "^0.1.7",
+    "@caido/eslint-config": "^0.5.0",
+    "@vitejs/plugin-vue": "5.2.1",
+    "eslint": "9.29.0",
+    "knip": "5.70.2",
+    "postcss-prefixwrap": "1.51.0",
+    "typescript": "5.5.4",
+    "vitest": "2.1.9"
+  }
+}
+
