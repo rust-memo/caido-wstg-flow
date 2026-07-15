@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a bounded, safe workflow improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Testing workflow problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: passive
+    attributes:
+      label: Safety boundary
+      options:
+        - label: The proposal can preserve explicit scope checks and avoid automatic request sending.
+          required: true

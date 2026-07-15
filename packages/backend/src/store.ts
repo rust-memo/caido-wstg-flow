@@ -1,17 +1,25 @@
 import { createHash } from "crypto";
 
 import type { SDK } from "caido:plugin";
-import type { Database } from "sqlite";
+import type { Database, Parameter } from "sqlite";
 
 import { validWstgId, WSTG_CATALOG } from "./catalog";
 import type {
   AssetDTO,
+  AssetQuery,
   CandidateDTO,
+  CandidateQuery,
   CandidateStatus,
   CheckStatus,
   ComparisonDTO,
+  Confidence,
   DetectedCandidate,
   FindingDTO,
+  FindingQuery,
+  Page,
+  ParameterLocation,
+  ProjectSummary,
+  Severity,
   WstgSettings,
   WstgTestDTO,
 } from "./types";
@@ -39,14 +47,14 @@ type CandidateRow = {
   rule_id: string;
   title: string;
   category: string;
-  severity: string;
-  confidence: string;
+  severity: Severity;
+  confidence: Confidence;
   url: string;
   method: string;
   status_code: number;
   wstg_id: string;
   parameter_name: string;
-  parameter_location: string;
+  parameter_location: ParameterLocation;
   evidence: string;
   explanation: string;
   recommended_test: string;
@@ -66,8 +74,8 @@ type FindingRow = {
   candidate_id?: string;
   created_at: string;
   title: string;
-  severity: string;
-  confidence: string;
+  severity: Severity;
+  confidence: Confidence;
   url: string;
   method: string;
   status_code: number;
@@ -176,6 +184,16 @@ export class WstgStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS wstg_schema (
+        key TEXT PRIMARY KEY,
+        version INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS wstg_candidates_filter
+        ON wstg_candidates(project_id, status, severity, last_seen DESC);
+      CREATE INDEX IF NOT EXISTS wstg_assets_discovered
+        ON wstg_assets(project_id, discovered_at DESC);
+      INSERT OR IGNORE INTO wstg_schema(key, version) VALUES('wstg-flow', 2);
+      UPDATE wstg_schema SET version = 2 WHERE key = 'wstg-flow' AND version < 2;
     `);
   }
 
@@ -235,6 +253,165 @@ export class WstgStore {
     return (await statement.all<CandidateRow>(projectId)).map(toCandidate);
   }
 
+  async overview(projectId: string): Promise<{
+    tests: WstgTestDTO[];
+    recentCandidates: CandidateDTO[];
+    summary: ProjectSummary;
+  }> {
+    const database = this.requireDatabase();
+    const [tests, recentRows, candidateCounts, findingCount, assetCount] =
+      await Promise.all([
+        this.tests(projectId),
+        database
+          .prepare(
+            "SELECT * FROM wstg_candidates WHERE project_id = ? ORDER BY last_seen DESC LIMIT 12",
+          )
+          .then((statement) => statement.all<CandidateRow>(projectId)),
+        database
+          .prepare(
+            `
+            SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN status = 'NEW' THEN 1 ELSE 0 END), 0) AS new_count
+            FROM wstg_candidates WHERE project_id = ?
+          `,
+          )
+          .then((statement) =>
+            statement.get<{ total: number; new_count: number }>(projectId),
+          ),
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM wstg_findings WHERE project_id = ?",
+          )
+          .then((statement) => statement.get<{ count: number }>(projectId)),
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM wstg_assets WHERE project_id = ?",
+          )
+          .then((statement) => statement.get<{ count: number }>(projectId)),
+      ]);
+    return {
+      tests,
+      recentCandidates: recentRows.map(toCandidate),
+      summary: {
+        candidateTotal: candidateCounts?.total ?? 0,
+        newCandidateCount: candidateCounts?.new_count ?? 0,
+        findingTotal: findingCount?.count ?? 0,
+        assetTotal: assetCount?.count ?? 0,
+        testedCount: tests.filter((test) => test.status !== "NOT_TESTED")
+          .length,
+        passCount: tests.filter((test) => test.status === "PASS").length,
+        failCount: tests.filter((test) => test.status === "FAIL").length,
+      },
+    };
+  }
+
+  async listCandidates(
+    projectId: string,
+    value: CandidateQuery,
+  ): Promise<Page<CandidateDTO>> {
+    const query = normalizeCandidateQuery(value);
+    const where = ["project_id = ?"];
+    const parameters: Parameter[] = [projectId];
+    if (query.status !== "ALL") {
+      where.push("status = ?");
+      parameters.push(query.status);
+    }
+    if (query.severity !== "ALL") {
+      where.push("severity = ?");
+      parameters.push(query.severity);
+    }
+    if (query.search !== "") {
+      where.push(`instr(lower(
+        title || ' ' || rule_id || ' ' || url || ' ' || parameter_name || ' ' || category || ' ' || wstg_id
+      ), ?) > 0`);
+      parameters.push(query.search);
+    }
+    const clause = where.join(" AND ");
+    const database = this.requireDatabase();
+    const [rows, count] = await Promise.all([
+      database
+        .prepare(
+          `SELECT * FROM wstg_candidates WHERE ${clause} ORDER BY last_seen DESC LIMIT ? OFFSET ?`,
+        )
+        .then((statement) =>
+          statement.all<CandidateRow>(...parameters, query.limit, query.offset),
+        ),
+      database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM wstg_candidates WHERE ${clause}`,
+        )
+        .then((statement) => statement.get<{ count: number }>(...parameters)),
+    ]);
+    return {
+      items: rows.map(toCandidate),
+      total: count?.count ?? 0,
+      offset: query.offset,
+      limit: query.limit,
+    };
+  }
+
+  async listAssets(
+    projectId: string,
+    value: AssetQuery,
+  ): Promise<Page<AssetDTO>> {
+    const query = normalizeAssetQuery(value);
+    const searchClause =
+      query.search === ""
+        ? ""
+        : " AND instr(lower(kind || ' ' || url || ' ' || source_url), ?) > 0";
+    const parameters: Parameter[] =
+      query.search === "" ? [projectId] : [projectId, query.search];
+    const database = this.requireDatabase();
+    const [rows, count] = await Promise.all([
+      database
+        .prepare(
+          `SELECT * FROM wstg_assets WHERE project_id = ?${searchClause} ORDER BY discovered_at DESC LIMIT ? OFFSET ?`,
+        )
+        .then((statement) =>
+          statement.all<AssetRow>(...parameters, query.limit, query.offset),
+        ),
+      database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM wstg_assets WHERE project_id = ?${searchClause}`,
+        )
+        .then((statement) => statement.get<{ count: number }>(...parameters)),
+    ]);
+    return {
+      items: rows.map(toAsset),
+      total: count?.count ?? 0,
+      offset: query.offset,
+      limit: query.limit,
+    };
+  }
+
+  async listFindings(
+    projectId: string,
+    value: FindingQuery,
+  ): Promise<Page<FindingDTO>> {
+    const query = normalizePageQuery(value);
+    const database = this.requireDatabase();
+    const [rows, count] = await Promise.all([
+      database
+        .prepare(
+          "SELECT * FROM wstg_findings WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        )
+        .then((statement) =>
+          statement.all<FindingRow>(projectId, query.limit, query.offset),
+        ),
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM wstg_findings WHERE project_id = ?",
+        )
+        .then((statement) => statement.get<{ count: number }>(projectId)),
+    ]);
+    return {
+      items: rows.map(toFinding),
+      total: count?.count ?? 0,
+      offset: query.offset,
+      limit: query.limit,
+    };
+  }
+
   async findings(projectId: string): Promise<FindingDTO[]> {
     const statement = await this.requireDatabase().prepare(
       "SELECT * FROM wstg_findings WHERE project_id = ? ORDER BY created_at DESC",
@@ -266,33 +443,36 @@ export class WstgStore {
     maximumCandidates: number,
   ): Promise<number> {
     let added = 0;
+    const database = this.requireDatabase();
+    const existingStatement = await database.prepare(
+      "SELECT id FROM wstg_candidates WHERE project_id = ? AND fingerprint = ?",
+    );
+    const insert = await database.prepare(`
+      INSERT OR IGNORE INTO wstg_candidates(
+        project_id, id, fingerprint, request_id, response_id, created_at, last_seen,
+        rule_id, title, category, severity, confidence, url, method, status_code,
+        wstg_id, parameter_name, parameter_location, evidence, explanation,
+        recommended_test, payloads_json
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE (
+          SELECT COUNT(*) FROM wstg_candidates WHERE project_id = ?
+        ) < ?
+    `);
+    const update = await database.prepare(`
+      UPDATE wstg_candidates SET request_id = ?, response_id = ?, last_seen = ?,
+        occurrence_count = occurrence_count + 1, status_code = ?, evidence = ?
+      WHERE project_id = ? AND fingerprint = ?
+    `);
     for (const candidate of candidates) {
       const fingerprint = candidateFingerprint(candidate);
-      const existing = await this.requireDatabase()
-        .prepare(
-          "SELECT id FROM wstg_candidates WHERE project_id = ? AND fingerprint = ?",
-        )
-        .then((statement) =>
-          statement.get<{ id: string }>(projectId, fingerprint),
-        );
+      const existing = await existingStatement.get<{ id: string }>(
+        projectId,
+        fingerprint,
+      );
       const now = new Date().toISOString();
       if (existing === undefined) {
-        const count = await this.requireDatabase()
-          .prepare(
-            "SELECT COUNT(*) AS count FROM wstg_candidates WHERE project_id = ?",
-          )
-          .then((statement) => statement.get<{ count: number }>(projectId));
-        if ((count?.count ?? 0) >= maximumCandidates) continue;
         const id = sha256(`${projectId}\n${fingerprint}`).slice(0, 24);
-        const insert = await this.requireDatabase().prepare(`
-          INSERT INTO wstg_candidates(
-            project_id, id, fingerprint, request_id, response_id, created_at, last_seen,
-            rule_id, title, category, severity, confidence, url, method, status_code,
-            wstg_id, parameter_name, parameter_location, evidence, explanation,
-            recommended_test, payloads_json
-          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        await insert.run(
+        const result = await insert.run(
           projectId,
           id,
           fingerprint,
@@ -315,14 +495,23 @@ export class WstgStore {
           candidate.explanation,
           candidate.recommendedTest,
           JSON.stringify(candidate.payloads),
+          projectId,
+          maximumCandidates,
         );
-        added += 1;
+        if (result.changes === 0) {
+          await update.run(
+            candidate.requestId,
+            candidate.responseId,
+            now,
+            candidate.statusCode,
+            candidate.evidence,
+            projectId,
+            fingerprint,
+          );
+        } else {
+          added += 1;
+        }
       } else {
-        const update = await this.requireDatabase().prepare(`
-          UPDATE wstg_candidates SET request_id = ?, response_id = ?, last_seen = ?,
-            occurrence_count = occurrence_count + 1, status_code = ?, evidence = ?
-          WHERE project_id = ? AND fingerprint = ?
-        `);
         await update.run(
           candidate.requestId,
           candidate.responseId,
@@ -334,13 +523,13 @@ export class WstgStore {
         );
       }
     }
+    const assetStatement = await database.prepare(`
+      INSERT OR IGNORE INTO wstg_assets(project_id, id, url, source_url, kind, discovered_at)
+      VALUES(?, ?, ?, ?, ?, ?)
+    `);
     for (const asset of assets) {
       const id = sha256(`${asset.kind}\n${asset.url}`).slice(0, 24);
-      const statement = await this.requireDatabase().prepare(`
-        INSERT OR IGNORE INTO wstg_assets(project_id, id, url, source_url, kind, discovered_at)
-        VALUES(?, ?, ?, ?, ?, ?)
-      `);
-      await statement.run(
+      await assetStatement.run(
         projectId,
         id,
         clip(asset.url, 4_000),
@@ -420,7 +609,7 @@ export class WstgStore {
     await statement.run(projectId, wstgId, status, clip(notes.trim(), 10_000));
   }
 
-  async confirmCandidate(
+  async prepareFinding(
     projectId: string,
     candidate: CandidateDTO,
   ): Promise<FindingDTO> {
@@ -454,6 +643,14 @@ export class WstgStore {
       requestId: candidate.variantRequestId ?? candidate.requestId,
       published: false,
     };
+    return finding;
+  }
+
+  async completePublishedFinding(
+    projectId: string,
+    candidate: CandidateDTO,
+    finding: FindingDTO,
+  ): Promise<void> {
     const insert = await this.requireDatabase().prepare(`
       INSERT OR REPLACE INTO wstg_findings(
         project_id, id, candidate_id, created_at, title, severity, confidence, url,
@@ -476,13 +673,13 @@ export class WstgStore {
       finding.evidence,
       finding.remediation,
       finding.requestId ?? "",
-      0,
+      1,
     );
     await this.requireDatabase()
       .prepare(
-        "UPDATE wstg_candidates SET status = 'CONFIRMED', confirmed_finding_id = ? WHERE project_id = ? AND id = ?",
+        "UPDATE wstg_candidates SET status = 'CONFIRMED', confirmed_finding_id = ?, published = 1 WHERE project_id = ? AND id = ?",
       )
-      .then((statement) => statement.run(id, projectId, candidate.id));
+      .then((statement) => statement.run(finding.id, projectId, candidate.id));
     if (candidate.wstgId !== "")
       await this.updateTest(
         projectId,
@@ -490,20 +687,6 @@ export class WstgStore {
         "FAIL",
         "Confirmed finding recorded by WSTG Flow.",
       );
-    return finding;
-  }
-
-  async markPublished(projectId: string, findingId: string): Promise<void> {
-    await this.requireDatabase()
-      .prepare(
-        "UPDATE wstg_findings SET published = 1 WHERE project_id = ? AND id = ?",
-      )
-      .then((statement) => statement.run(projectId, findingId));
-    await this.requireDatabase()
-      .prepare(
-        "UPDATE wstg_candidates SET published = 1 WHERE project_id = ? AND confirmed_finding_id = ?",
-      )
-      .then((statement) => statement.run(projectId, findingId));
   }
 
   async clearUnconfirmed(projectId: string): Promise<void> {
@@ -639,6 +822,46 @@ function bounded(value: number, minimum: number, maximum: number): number {
   return Number.isFinite(value)
     ? Math.max(minimum, Math.min(Math.round(value), maximum))
     : minimum;
+}
+
+export function normalizeCandidateQuery(value: CandidateQuery): CandidateQuery {
+  return {
+    search: clip(value.search.trim().toLowerCase(), 200),
+    status: isCandidateStatus(value.status) ? value.status : "ALL",
+    severity: isSeverity(value.severity) ? value.severity : "ALL",
+    ...normalizePageQuery(value),
+  };
+}
+
+export function normalizeAssetQuery(value: AssetQuery): AssetQuery {
+  return {
+    search: clip(value.search.trim().toLowerCase(), 200),
+    ...normalizePageQuery(value),
+  };
+}
+
+export function normalizePageQuery(value: { offset: number; limit: number }): {
+  offset: number;
+  limit: number;
+} {
+  return {
+    offset: bounded(value.offset, 0, 1_000_000),
+    limit: bounded(value.limit, 1, 100),
+  };
+}
+
+function isCandidateStatus(
+  value: CandidateQuery["status"],
+): value is CandidateQuery["status"] {
+  return ["ALL", "NEW", "REVIEWING", "CONFIRMED", "REJECTED"].includes(value);
+}
+
+function isSeverity(
+  value: CandidateQuery["severity"],
+): value is CandidateQuery["severity"] {
+  return ["ALL", "Critical", "High", "Medium", "Low", "Information"].includes(
+    value,
+  );
 }
 
 function parseStringArray(value: string): string[] {

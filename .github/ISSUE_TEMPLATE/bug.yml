@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible WSTG Flow problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, raw authenticated traffic, or private target data.
+  - type: input
+    id: caido-version
+    attributes:
+      label: Caido version
+      placeholder: 0.57.1
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: WSTG Flow version
+      placeholder: 1.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description and reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I removed credentials and private target data from this report.
+          required: true

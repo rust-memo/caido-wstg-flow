@@ -1,7 +1,9 @@
 import type {
   AnalyzerInput,
   AnalyzerParameter,
+  Confidence,
   DetectedCandidate,
+  Severity,
 } from "./types";
 
 type DetectedAsset = {
@@ -18,7 +20,7 @@ type AnalysisResult = {
 type SecretRule = {
   id: string;
   title: string;
-  severity: string;
+  severity: Severity;
   wstgId: string;
   pattern: RegExp;
 };
@@ -676,8 +678,8 @@ function parameterCandidate(
   ruleId: string,
   title: string,
   category: string,
-  severity: string,
-  confidence: string,
+  severity: Severity,
+  confidence: Confidence,
   wstgId: string,
   explanation: string,
   recommendedTest: string,
@@ -707,8 +709,8 @@ function baseCandidate(
   ruleId: string,
   title: string,
   category: string,
-  severity: string,
-  confidence: string,
+  severity: Severity,
+  confidence: Confidence,
   wstgId: string,
   evidence: string,
   recommendedTest: string,
@@ -756,7 +758,10 @@ function cookieCandidate(
   return candidate;
 }
 
-function parseEncoded(raw: string, location: string): AnalyzerParameter[] {
+function parseEncoded(
+  raw: string,
+  location: AnalyzerParameter["location"],
+): AnalyzerParameter[] {
   if (raw === "") return [];
   return raw.split("&").map((pair) => {
     const separator = pair.indexOf("=");
@@ -861,12 +866,17 @@ function mask(value: string): string {
 }
 
 function context(value: string, index: number, length: number): string {
-  return value
+  let result = value
     .slice(
       Math.max(0, index - 100),
       Math.min(value.length, index + length + 100),
     )
     .replace(/[\r\n]+/g, " ");
+  for (const rule of SECRET_RULES)
+    result = result.replace(rule.pattern, (found) => mask(found));
+  return result.replace(GENERIC_SECRET, (found, token: string) =>
+    found.replace(token, mask(token)),
+  );
 }
 
 function redactURL(value: string): string {
@@ -916,7 +926,7 @@ function safeDecode(value: string): string {
 function secret(
   id: string,
   title: string,
-  severity: string,
+  severity: Severity,
   wstgId: string,
   pattern: RegExp,
 ): SecretRule {

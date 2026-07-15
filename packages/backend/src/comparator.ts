@@ -54,6 +54,7 @@ export function compareMessages(
   )
     outcome = "POSSIBLE_AUTHORIZATION_BYPASS";
   else if (
+    sameResource &&
     aResponse.status === bResponse.status &&
     (substantiveJSONSame || similarity >= 0.98)
   )

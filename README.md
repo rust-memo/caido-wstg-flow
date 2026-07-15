@@ -2,6 +2,8 @@
 
 WSTG Flow is a project-aware OWASP Web Security Testing Guide workbench for Caido. It combines an offline 113-test WSTG checklist with bounded passive analysis of Caido HTTP History, a candidate review queue, manual A/B evidence comparison, JavaScript asset inventory, Caido Finding publication, and redacted reports.
 
+Version 1.1 adds Caido 0.57 compatibility, server-side pagination for large projects, safer scan cancellation and A/B limits, non-destructive settings, accessible confirmations, complete redacted reports, and automated release checks.
+
 This is the Caido-native companion to the original Burp Suite `WSTG-Flow` extension. The Burp project remains independent and unchanged.
 
 Passive analysis never sends requests. Payload actions only create an unsent Replay session. A/B verification only links two existing Caido exchanges that the tester has already sent and compares their saved responses.
@@ -15,25 +17,28 @@ Candidates are review leads, not vulnerability verdicts. Test only systems for w
 - Detects review candidates for access control, redirects, SSRF-like URL inputs, traversal, injection, dangerous rendering, privileged fields, GraphQL/admin routes, missing security headers, cookie attributes, secrets, verbose errors, internal addresses, and risky JavaScript patterns.
 - Extracts JavaScript endpoints, source-map references, and script assets from traffic already present in Caido; it does not fetch assets itself.
 - Deduplicates candidates, records occurrence counts, supports review states and WSTG remapping, and persists data separately for each Caido project.
+- Uses bounded server-side candidate, finding, and asset pages so large projects do not send the full data set after every analyzed response.
 - Opens the exact saved source request and response in read-only HTTP editors.
 - Creates a modified Replay session for a selected payload after a confirmation prompt; it never sends the request.
 - Links existing Account A and Account B Request IDs, then compares status, authentication barriers, content similarity, identity evidence, JSON fields, and selected header changes.
 - Publishes a Caido Finding only after explicit confirmation and uses a stable deduplication key.
 - Exports redacted HTML, JSON, and CSV reports. Request IDs, fingerprints, credentials, cookies, and common sensitive parameter values are excluded or masked.
-- Supports pause, resume, cancel, bounded History rescan, ignored hosts, body-size limits, and scope-only mode.
+- Supports generation-safe pause, resume, cancel, bounded History rescan, ignored hosts, body-size limits, and scope-only mode.
+- Saves Settings without deleting candidates. Rebuilding unconfirmed candidates is a separate confirmed action.
 
 ## Requirements and build
 
-- Node.js 20 or newer.
-- pnpm 9.
-- A current Caido release compatible with SDK `0.46.x`.
+- Node.js 22 or newer.
+- pnpm 11.
+- Caido 0.57 or newer, built against SDK `0.57.1`.
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm typecheck
-pnpm test
+pnpm test:coverage
 pnpm lint
 pnpm knip
+pnpm audit --audit-level high
 pnpm build
 ```
 
@@ -63,10 +68,25 @@ The loadable package is created at `dist/plugin_package.zip`.
 - Replay preparation is scope-checked and creates a draft only.
 - A/B comparison reads existing Caido messages; it does not impersonate users or send either request.
 - History count, candidate count, request size, and response size are bounded in Settings.
+- A/B evidence is rejected when its raw request or response exceeds the configured size limits, and two distinct saved exchanges are required.
 - Binary and oversized bodies are skipped or clipped.
 - Candidate URLs and evidence are masked before storage where applicable. Existing raw HTTP messages stay in the Caido project and are shown only through Caido's editors.
 - Reports redact common credentials and secret parameter patterns and omit internal candidate fingerprints and Request IDs.
-- Changing Settings rebuilds unconfirmed candidates. Confirmed findings and checklist progress are retained.
+- Saving Settings is non-destructive. The explicit rebuild action clears only unconfirmed candidates; confirmed findings and checklist progress are retained.
+
+## Upgrading from 1.0
+
+Install the 1.1 package over the existing plugin. The database migration is idempotent and retains checklist progress, candidates, evidence links, findings, assets, and Settings. No automatic candidate rebuild is performed during upgrade. Caido 0.57 or newer is required.
+
+## Release verification
+
+GitHub releases contain `plugin_package.zip` and `SHA256SUMS`. Verify the package before installation:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+Release tags are created only after type checking, coverage tests, linting, unused-code analysis, high-severity dependency audit, and a production build pass in GitHub Actions.
 
 ## Burp-to-Caido differences
 

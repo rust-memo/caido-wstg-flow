@@ -1,15 +1,27 @@
 import type { SDK } from "caido:plugin";
-import type { Cursor, ID, Request, RequestSpec, Response } from "caido:utils";
+import type { Request, Response } from "caido:utils";
 
 import { compareMessages } from "./comparator";
 import { analyze, parseParameters } from "./detector";
+import { mutateRequest } from "./mutator";
+import { buildReport } from "./report";
 import { WstgStore } from "./store";
 import type {
+  AssetDTO,
+  AssetQuery,
+  CandidateDTO,
+  CandidateQuery,
   CandidateStatus,
   CheckStatus,
+  DataArea,
+  FindingDTO,
+  FindingQuery,
   MessageDetails,
+  Overview,
+  Page,
+  ReportFile,
+  ReportFormat,
   ScanState,
-  Snapshot,
   WstgSettings,
 } from "./types";
 
@@ -43,6 +55,10 @@ export class WstgScanner {
   private monitorStarted = false;
   private monitorSince = new Date();
   private activeWorkers = 0;
+  private readonly activeByGeneration = new Map<number, number>();
+  private revision = 0;
+  private readonly pendingAreas = new Set<DataArea>();
+  private changeScheduled = false;
 
   async initialize(sdk: WstgSDK): Promise<void> {
     await this.store.initialize(sdk);
@@ -53,47 +69,93 @@ export class WstgScanner {
     sdk.events.onProjectChange((_eventSDK, project) => {
       this.monitorSince = new Date();
       if (project === null) this.cancel(sdk, "No active Caido project");
-      else if (this.requireSettings().autoHistory) void this.rescan(sdk, false);
+      else if (
+        this.requireSettings().analysisEnabled &&
+        this.requireSettings().autoHistory
+      )
+        void this.rescan(sdk, false);
       else this.resetRuntime(sdk, "Monitoring new responses");
     });
-    if (this.settings.autoHistory) await this.rescan(sdk, false);
-    else this.resetRuntime(sdk, "Monitoring new responses");
+    if (this.settings.analysisEnabled && this.settings.autoHistory)
+      await this.rescan(sdk, false);
+    else
+      this.resetRuntime(
+        sdk,
+        this.settings.analysisEnabled
+          ? "Monitoring new responses"
+          : "Automatic passive analysis disabled",
+      );
     this.startMonitor(sdk);
   }
 
-  async getSnapshot(sdk: WstgSDK): Promise<Snapshot> {
+  async getOverview(sdk: WstgSDK): Promise<Overview> {
     const projectId = await this.currentProjectId(sdk);
     const settings = this.requireSettings();
     if (projectId === undefined)
       return {
         tests: [],
-        candidates: [],
-        findings: [],
-        assets: [],
+        recentCandidates: [],
+        summary: {
+          candidateTotal: 0,
+          newCandidateCount: 0,
+          findingTotal: 0,
+          assetTotal: 0,
+          testedCount: 0,
+          passCount: 0,
+          failCount: 0,
+        },
         settings,
         state: { ...this.state, message: "No active Caido project" },
       };
+    const overview = await this.store.overview(projectId);
+    return {
+      ...overview,
+      settings,
+      state: this.copyState(),
+    };
+  }
+
+  async listCandidates(
+    sdk: WstgSDK,
+    query: CandidateQuery,
+  ): Promise<Page<CandidateDTO>> {
+    return this.store.listCandidates(await this.requireProjectId(sdk), query);
+  }
+
+  async listAssets(sdk: WstgSDK, query: AssetQuery): Promise<Page<AssetDTO>> {
+    return this.store.listAssets(await this.requireProjectId(sdk), query);
+  }
+
+  async listFindings(
+    sdk: WstgSDK,
+    query: FindingQuery,
+  ): Promise<Page<FindingDTO>> {
+    return this.store.listFindings(await this.requireProjectId(sdk), query);
+  }
+
+  async getCandidate(
+    sdk: WstgSDK,
+    id: string,
+  ): Promise<CandidateDTO | undefined> {
+    return this.store.getCandidate(await this.requireProjectId(sdk), id);
+  }
+
+  async exportReport(sdk: WstgSDK, format: ReportFormat): Promise<ReportFile> {
+    const projectId = await this.requireProjectId(sdk);
     const [tests, candidates, findings, assets] = await Promise.all([
       this.store.tests(projectId),
       this.store.candidates(projectId),
       this.store.findings(projectId),
       this.store.assets(projectId),
     ]);
-    return {
-      tests,
-      candidates,
-      findings,
-      assets,
-      settings,
-      state: this.copyState(),
-    };
+    return buildReport(format, { tests, candidates, findings, assets });
   }
 
   async getMessage(
     sdk: WstgSDK,
     requestId: string,
   ): Promise<MessageDetails | undefined> {
-    const pair = await sdk.requests.get(requestId as ID);
+    const pair = await sdk.requests.get(requestId);
     if (pair === undefined) return undefined;
     return {
       requestId,
@@ -105,7 +167,13 @@ export class WstgScanner {
   async saveSettings(sdk: WstgSDK, value: WstgSettings): Promise<WstgSettings> {
     this.settings = await this.store.saveSettings(value);
     this.monitorSince = new Date();
-    await this.rescan(sdk, true);
+    this.cancel(
+      sdk,
+      this.settings.analysisEnabled
+        ? "Settings saved; scan History to apply them to existing traffic"
+        : "Settings saved; automatic passive analysis disabled",
+    );
+    this.scheduleDataChanged(sdk, "overview");
     return this.settings;
   }
 
@@ -120,7 +188,7 @@ export class WstgScanner {
     if ((await this.store.getCandidate(projectId, id)) === undefined)
       throw new Error("Candidate no longer exists");
     await this.store.updateCandidate(projectId, id, status, wstgId, notes);
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates");
   }
 
   async updateTest(
@@ -135,12 +203,12 @@ export class WstgScanner {
       status,
       notes,
     );
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview");
   }
 
   async analyzeRequest(sdk: WstgSDK, requestId: string): Promise<void> {
     const projectId = await this.requireProjectId(sdk);
-    const pair = await sdk.requests.get(requestId as ID);
+    const pair = await sdk.requests.get(requestId);
     if (pair === undefined || pair.response === undefined)
       throw new Error("A saved request and response are required");
     if (this.requireSettings().scopeOnly && !sdk.requests.inScope(pair.request))
@@ -151,7 +219,7 @@ export class WstgScanner {
       request: pair.request,
       response: pair.response,
     });
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates", "assets");
   }
 
   async attachEvidence(
@@ -163,26 +231,49 @@ export class WstgScanner {
     const projectId = await this.requireProjectId(sdk);
     const candidate = await this.store.getCandidate(projectId, candidateId);
     if (candidate === undefined) throw new Error("Candidate no longer exists");
-    const pair = await sdk.requests.get(requestId as ID);
+    const pair = await sdk.requests.get(requestId);
     if (pair === undefined || pair.response === undefined)
       throw new Error("Verification evidence requires a saved response");
     if (!sdk.requests.inScope(pair.request))
       throw new Error("Verification evidence must remain in Caido Scope");
+    assertComparisonSize(pair.request, pair.response, this.requireSettings());
     const baselineId =
       slot === "BASELINE" ? requestId : candidate.baselineRequestId;
     const variantId =
       slot === "VARIANT" ? requestId : candidate.variantRequestId;
     let comparison;
     if (baselineId !== undefined && variantId !== undefined) {
-      const baseline = await sdk.requests.get(baselineId as ID);
-      const variant = await sdk.requests.get(variantId as ID);
-      if (baseline?.response !== undefined && variant?.response !== undefined)
+      if (baselineId === variantId)
+        throw new Error(
+          "Account A and Account B must use different saved exchanges",
+        );
+      const baseline = await sdk.requests.get(baselineId);
+      const variant = await sdk.requests.get(variantId);
+      if (baseline?.response !== undefined && variant?.response !== undefined) {
+        if (
+          !sdk.requests.inScope(baseline.request) ||
+          !sdk.requests.inScope(variant.request)
+        )
+          throw new Error(
+            "Both verification exchanges must remain in Caido Scope",
+          );
+        assertComparisonSize(
+          baseline.request,
+          baseline.response,
+          this.requireSettings(),
+        );
+        assertComparisonSize(
+          variant.request,
+          variant.response,
+          this.requireSettings(),
+        );
         comparison = compareMessages(
           baseline.request.getRaw().toText(),
           baseline.response.getRaw().toText(),
           variant.request.getRaw().toText(),
           variant.response.getRaw().toText(),
         );
+      }
     }
     await this.store.attachEvidence(
       projectId,
@@ -191,7 +282,7 @@ export class WstgScanner {
       slot,
       comparison,
     );
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "candidates");
   }
 
   async clearEvidence(sdk: WstgSDK, candidateId: string): Promise<void> {
@@ -199,7 +290,7 @@ export class WstgScanner {
       await this.requireProjectId(sdk),
       candidateId,
     );
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "candidates");
   }
 
   async prepareReplay(
@@ -216,11 +307,11 @@ export class WstgScanner {
       throw new Error(
         "This candidate has no automatically replaceable parameter",
       );
-    const pair = await sdk.requests.get(candidate.requestId as ID);
+    const pair = await sdk.requests.get(candidate.requestId);
     if (pair === undefined) throw new Error("Source request is unavailable");
     if (!sdk.requests.inScope(pair.request))
       throw new Error("Out-of-scope requests are blocked");
-    const spec = mutate(
+    const spec = mutateRequest(
       pair.request.toSpec(),
       candidate.parameter,
       candidate.location,
@@ -238,10 +329,10 @@ export class WstgScanner {
     if (candidate === undefined) throw new Error("Candidate no longer exists");
     if (candidate.status === "REJECTED")
       throw new Error("Rejected candidates must be moved to Reviewing first");
-    const finding = await this.store.confirmCandidate(projectId, candidate);
+    const finding = await this.store.prepareFinding(projectId, candidate);
     if (!finding.published) {
       const pair = await sdk.requests.get(
-        (finding.requestId ?? candidate.requestId) as ID,
+        finding.requestId ?? candidate.requestId,
       );
       if (pair === undefined) throw new Error("Finding request is unavailable");
       await sdk.findings.create({
@@ -255,16 +346,20 @@ export class WstgScanner {
         dedupeKey: `wstg-flow:${finding.id}`,
         request: pair.request,
       });
-      await this.store.markPublished(projectId, finding.id);
+      await this.store.completePublishedFinding(projectId, candidate, finding);
     }
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates", "findings");
   }
 
   async clearCandidates(sdk: WstgSDK): Promise<void> {
     const projectId = await this.requireProjectId(sdk);
     this.cancel(sdk, "Unconfirmed candidates cleared");
     await this.store.clearUnconfirmed(projectId);
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates");
+  }
+
+  async rebuildCandidates(sdk: WstgSDK): Promise<void> {
+    await this.rescan(sdk, true);
   }
 
   async rescan(sdk: WstgSDK, clear: boolean): Promise<void> {
@@ -278,17 +373,29 @@ export class WstgScanner {
     this.queue.length = 0;
     this.processed.clear();
     this.historyReading = true;
-    this.paused = false;
+    this.paused = clear;
     this.state.scanned = 0;
-    this.state.phase = "SCANNING";
-    this.state.message = "Reading Caido HTTP History";
-    if (clear) await this.store.clearUnconfirmed(projectId);
+    this.state.dropped = 0;
+    this.state.phase = clear ? "PAUSED" : "SCANNING";
+    this.state.message = clear
+      ? "Waiting for active analysis before rebuilding candidates"
+      : "Reading Caido HTTP History";
     this.publishState(sdk);
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates", "assets");
+    if (clear) {
+      if (!(await this.waitForOlderWorkers(generation))) return;
+      await this.store.clearUnconfirmed(projectId);
+      if (generation !== this.generation) return;
+      this.paused = false;
+      this.state.phase = "SCANNING";
+      this.state.message = "Reading Caido HTTP History";
+      this.publishState(sdk);
+    }
     void this.readHistory(sdk, projectId, generation);
   }
 
   pause(sdk: WstgSDK): void {
+    if (this.state.phase !== "SCANNING") return;
     this.paused = true;
     this.state.phase = "PAUSED";
     this.state.message = "Passive analysis paused";
@@ -296,11 +403,13 @@ export class WstgScanner {
   }
 
   resume(sdk: WstgSDK): void {
+    if (this.state.phase !== "PAUSED") return;
     this.paused = false;
     this.state.phase = "SCANNING";
     this.state.message = "Passive analysis resumed";
     this.publishState(sdk);
     this.pump(sdk);
+    this.finishIfIdle(sdk);
   }
 
   cancel(sdk: WstgSDK, message = "Queued work cancelled"): void {
@@ -312,6 +421,7 @@ export class WstgScanner {
     this.state.message = message;
     this.syncState();
     this.publishState(sdk);
+    this.scheduleDataChanged(sdk, "overview");
   }
 
   private async readHistory(
@@ -332,7 +442,7 @@ export class WstgScanner {
           .query()
           .descending("req", "created_at")
           .first(amount);
-        if (cursor !== undefined) query = query.after(cursor as Cursor);
+        if (cursor !== undefined) query = query.after(cursor);
         const page = await query.execute();
         if (page.items.length === 0) break;
         for (const item of page.items) {
@@ -439,7 +549,7 @@ export class WstgScanner {
     if (work.generation !== this.generation || this.processed.has(key)) return;
     this.processed.add(key);
     if (this.processed.size > this.requireSettings().maxHistoryEntries * 2) {
-      const oldest = this.processed.values().next().value as string | undefined;
+      const oldest = this.processed.values().next().value;
       if (oldest !== undefined) this.processed.delete(oldest);
     }
     if (this.queue.length >= 2_000) {
@@ -460,6 +570,10 @@ export class WstgScanner {
       const work = this.queue.shift();
       if (work === undefined) break;
       this.activeWorkers += 1;
+      this.activeByGeneration.set(
+        work.generation,
+        (this.activeByGeneration.get(work.generation) ?? 0) + 1,
+      );
       this.syncState();
       void this.process(sdk, work)
         .catch((error) =>
@@ -467,11 +581,17 @@ export class WstgScanner {
         )
         .finally(() => {
           this.activeWorkers -= 1;
+          const remaining =
+            (this.activeByGeneration.get(work.generation) ?? 1) - 1;
+          if (remaining <= 0) this.activeByGeneration.delete(work.generation);
+          else this.activeByGeneration.set(work.generation, remaining);
           this.syncState();
           this.publishState(sdk);
-          this.emitSnapshot(sdk);
           this.pump(sdk);
-          this.finishIfIdle(sdk);
+          if (work.generation === this.generation) {
+            this.scheduleDataChanged(sdk, "overview", "candidates", "assets");
+            this.finishIfIdle(sdk);
+          }
         });
     }
   }
@@ -483,23 +603,42 @@ export class WstgScanner {
       return;
     const input = toAnalyzerInput(work.request, work.response, settings);
     const result = analyze(input);
+    if (work.generation !== this.generation) return;
     await this.store.addAnalysis(
       work.projectId,
       result.candidates,
       result.assets,
       settings.maxCandidates,
     );
+    if (work.generation !== this.generation) return;
     this.state.scanned += 1;
   }
 
+  private async waitForOlderWorkers(generation: number): Promise<boolean> {
+    while (
+      [...this.activeByGeneration].some(
+        ([activeGeneration, count]) =>
+          activeGeneration !== generation && count > 0,
+      )
+    ) {
+      if (generation !== this.generation) return false;
+      await sleep(20);
+    }
+    return generation === this.generation;
+  }
+
   private finishIfIdle(sdk: WstgSDK): void {
-    if (this.historyReading || this.queue.length > 0 || this.activeWorkers > 0)
+    if (
+      this.historyReading ||
+      this.queue.length > 0 ||
+      (this.activeByGeneration.get(this.generation) ?? 0) > 0
+    )
       return;
     this.state.phase = "IDLE";
     this.state.message = `Passive analysis complete: ${this.state.scanned} responses analyzed`;
     this.syncState();
     this.publishState(sdk);
-    this.emitSnapshot(sdk);
+    this.scheduleDataChanged(sdk, "overview", "candidates", "assets");
   }
 
   private resetRuntime(sdk: WstgSDK, message: string): void {
@@ -511,12 +650,15 @@ export class WstgScanner {
     this.state.phase = "IDLE";
     this.state.message = message;
     this.state.scanned = 0;
+    this.state.dropped = 0;
+    this.syncState();
     this.publishState(sdk);
+    this.scheduleDataChanged(sdk, "overview");
   }
 
   private syncState(): void {
     this.state.queued = this.queue.length;
-    this.state.active = this.activeWorkers;
+    this.state.active = this.activeByGeneration.get(this.generation) ?? 0;
   }
 
   private publishState(sdk: WstgSDK): void {
@@ -528,12 +670,21 @@ export class WstgScanner {
     return { ...this.state };
   }
 
-  private emitSnapshot(sdk: WstgSDK): void {
-    void this.getSnapshot(sdk)
-      .then((snapshot) => sdk.api.send("snapshot", snapshot))
-      .catch((error) =>
-        sdk.console.error(`WSTG Flow snapshot failed: ${safeMessage(error)}`),
-      );
+  private scheduleDataChanged(sdk: WstgSDK, ...areas: DataArea[]): void {
+    areas.forEach((area) => this.pendingAreas.add(area));
+    if (this.changeScheduled) return;
+    this.changeScheduled = true;
+    setTimeout(() => {
+      this.changeScheduled = false;
+      if (this.pendingAreas.size === 0) return;
+      this.revision += 1;
+      const changedAreas = [...this.pendingAreas];
+      this.pendingAreas.clear();
+      sdk.api.send("data-changed", {
+        revision: this.revision,
+        areas: changedAreas,
+      });
+    }, 500);
   }
 
   private requireSettings(): WstgSettings {
@@ -610,104 +761,6 @@ function toAnalyzerInput(
   };
 }
 
-function mutate(
-  spec: RequestSpec,
-  name: string,
-  location: string,
-  payload: string,
-): RequestSpec {
-  if (location === "QUERY") {
-    spec.setQuery(replaceEncoded(spec.getQuery(), name, payload));
-    return spec;
-  }
-  if (location === "FORM") {
-    spec.setBody(
-      replaceEncoded(spec.getBody()?.toText() ?? "", name, payload),
-      { updateContentLength: true },
-    );
-    return spec;
-  }
-  if (location === "JSON") {
-    spec.setBody(replaceJSON(spec.getBody()?.toText() ?? "", name, payload), {
-      updateContentLength: true,
-    });
-    return spec;
-  }
-  if (location === "COOKIE") {
-    const values = spec.getHeader("Cookie") ?? [];
-    spec.setHeader(
-      "Cookie",
-      values.map((value) => replaceCookie(value, name, payload)).join("; "),
-    );
-    return spec;
-  }
-  throw new Error("This parameter location must be edited manually in Replay");
-}
-
-function replaceEncoded(raw: string, name: string, payload: string): string {
-  let replaced = false;
-  return raw
-    .split("&")
-    .map((pair) => {
-      const separator = pair.indexOf("=");
-      const rawName = separator < 0 ? pair : pair.slice(0, separator);
-      if (!replaced && safeDecode(rawName) === name) {
-        replaced = true;
-        return `${rawName}=${encodeURIComponent(payload)}`;
-      }
-      return pair;
-    })
-    .join("&");
-}
-
-function replaceCookie(raw: string, name: string, payload: string): string {
-  return raw
-    .split(";")
-    .map((part) => {
-      const separator = part.indexOf("=");
-      return (separator < 0 ? part : part.slice(0, separator)).trim() === name
-        ? `${name}=${payload}`
-        : part.trim();
-    })
-    .join("; ");
-}
-
-function replaceJSON(raw: string, name: string, payload: string): string {
-  let root: unknown;
-  try {
-    root = JSON.parse(raw) as unknown;
-  } catch {
-    return raw;
-  }
-  let replaced = false;
-  const walk = (value: unknown, depth: number): void => {
-    if (replaced || depth > 25 || value === null || typeof value !== "object")
-      return;
-    if (Array.isArray(value)) {
-      value.forEach((item) => walk(item, depth + 1));
-      return;
-    }
-    for (const [key, child] of Object.entries(value)) {
-      if (key === name) {
-        (value as Record<string, unknown>)[key] = payload;
-        replaced = true;
-        return;
-      }
-      walk(child, depth + 1);
-    }
-  };
-  walk(root, 0);
-  return replaced ? JSON.stringify(root) : raw;
-}
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value.replace(/\+/g, " "));
-  } catch {
-    return value;
-  }
-}
-
 function isTextResponse(request: Request, response: Response): boolean {
   const contentType = (response.getHeader("Content-Type") ?? [])
     .join(" ")
@@ -717,6 +770,21 @@ function isTextResponse(request: Request, response: Response): boolean {
     /(image|audio|video|font|octet-stream|pdf|zip)/.test(contentType) ||
     /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|pdf|zip|gz)$/.test(path)
   );
+}
+
+function assertComparisonSize(
+  request: Request,
+  response: Response,
+  settings: WstgSettings,
+): void {
+  if (request.getRaw().toBytes().length > settings.maxRequestBytes)
+    throw new Error(
+      "Verification request exceeds the configured request limit",
+    );
+  if (response.getRaw().toBytes().length > settings.maxResponseBytes)
+    throw new Error(
+      "Verification response exceeds the configured response limit",
+    );
 }
 
 function sleep(milliseconds: number): Promise<void> {

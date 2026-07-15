@@ -3,19 +3,47 @@ import type { DefineAPI, DefineEvents, SDK } from "caido:plugin";
 import { WstgScanner } from "./scanner";
 import type { WstgSDK } from "./scanner";
 import type {
+  AssetDTO,
+  AssetQuery,
+  CandidateDTO,
+  CandidateQuery,
   CandidateStatus,
   CheckStatus,
+  DataChanged,
+  FindingDTO,
+  FindingQuery,
   MessageDetails,
+  Overview,
+  Page,
+  ReportFile,
+  ReportFormat,
   ScanState,
-  Snapshot,
   WstgSettings,
 } from "./types";
 
 const scanner = new WstgScanner();
-const assistantSDK = (sdk: SDK): WstgSDK => sdk as unknown as WstgSDK;
+const assistantSDK = (sdk: SDK): WstgSDK => sdk;
 
-const getSnapshot = (sdk: SDK): Promise<Snapshot> =>
-  scanner.getSnapshot(assistantSDK(sdk));
+const getOverview = (sdk: SDK): Promise<Overview> =>
+  scanner.getOverview(assistantSDK(sdk));
+const listCandidates = (
+  sdk: SDK,
+  query: CandidateQuery,
+): Promise<Page<CandidateDTO>> =>
+  scanner.listCandidates(assistantSDK(sdk), query);
+const listAssets = (sdk: SDK, query: AssetQuery): Promise<Page<AssetDTO>> =>
+  scanner.listAssets(assistantSDK(sdk), query);
+const listFindings = (
+  sdk: SDK,
+  query: FindingQuery,
+): Promise<Page<FindingDTO>> => scanner.listFindings(assistantSDK(sdk), query);
+const getCandidate = (
+  sdk: SDK,
+  id: string,
+): Promise<CandidateDTO | undefined> =>
+  scanner.getCandidate(assistantSDK(sdk), id);
+const exportReport = (sdk: SDK, format: ReportFormat): Promise<ReportFile> =>
+  scanner.exportReport(assistantSDK(sdk), format);
 const getMessage = (
   sdk: SDK,
   requestId: string,
@@ -61,6 +89,8 @@ const confirmAndPublish = (sdk: SDK, candidateId: string): Promise<void> =>
   scanner.confirmAndPublish(assistantSDK(sdk), candidateId);
 const rescanHistory = (sdk: SDK): Promise<void> =>
   scanner.rescan(assistantSDK(sdk), false);
+const rebuildCandidates = (sdk: SDK): Promise<void> =>
+  scanner.rebuildCandidates(assistantSDK(sdk));
 const clearCandidates = (sdk: SDK): Promise<void> =>
   scanner.clearCandidates(assistantSDK(sdk));
 const pause = (sdk: SDK): void => scanner.pause(assistantSDK(sdk));
@@ -68,7 +98,12 @@ const resume = (sdk: SDK): void => scanner.resume(assistantSDK(sdk));
 const cancel = (sdk: SDK): void => scanner.cancel(assistantSDK(sdk));
 
 export type API = DefineAPI<{
-  getSnapshot: typeof getSnapshot;
+  getOverview: typeof getOverview;
+  listCandidates: typeof listCandidates;
+  listAssets: typeof listAssets;
+  listFindings: typeof listFindings;
+  getCandidate: typeof getCandidate;
+  exportReport: typeof exportReport;
   getMessage: typeof getMessage;
   saveSettings: typeof saveSettings;
   updateCandidate: typeof updateCandidate;
@@ -79,6 +114,7 @@ export type API = DefineAPI<{
   prepareReplay: typeof prepareReplay;
   confirmAndPublish: typeof confirmAndPublish;
   rescanHistory: typeof rescanHistory;
+  rebuildCandidates: typeof rebuildCandidates;
   clearCandidates: typeof clearCandidates;
   pause: typeof pause;
   resume: typeof resume;
@@ -86,12 +122,17 @@ export type API = DefineAPI<{
 }>;
 
 export type BackendEvents = DefineEvents<{
-  snapshot: (snapshot: Snapshot) => void;
+  "data-changed": (change: DataChanged) => void;
   "scan-state": (state: ScanState) => void;
 }>;
 
 export function init(sdk: SDK<API, BackendEvents>) {
-  sdk.api.register("getSnapshot", getSnapshot);
+  sdk.api.register("getOverview", getOverview);
+  sdk.api.register("listCandidates", listCandidates);
+  sdk.api.register("listAssets", listAssets);
+  sdk.api.register("listFindings", listFindings);
+  sdk.api.register("getCandidate", getCandidate);
+  sdk.api.register("exportReport", exportReport);
   sdk.api.register("getMessage", getMessage);
   sdk.api.register("saveSettings", saveSettings);
   sdk.api.register("updateCandidate", updateCandidate);
@@ -102,6 +143,7 @@ export function init(sdk: SDK<API, BackendEvents>) {
   sdk.api.register("prepareReplay", prepareReplay);
   sdk.api.register("confirmAndPublish", confirmAndPublish);
   sdk.api.register("rescanHistory", rescanHistory);
+  sdk.api.register("rebuildCandidates", rebuildCandidates);
   sdk.api.register("clearCandidates", clearCandidates);
   sdk.api.register("pause", pause);
   sdk.api.register("resume", resume);
@@ -119,10 +161,21 @@ export type {
   CandidateStatus,
   CheckStatus,
   ComparisonDTO,
+  Confidence,
+  DataArea,
+  DataChanged,
   FindingDTO,
+  FindingQuery,
   MessageDetails,
+  Overview,
+  Page,
+  ParameterLocation,
+  ProjectSummary,
+  ReportFile,
+  ReportFormat,
   ScanState,
-  Snapshot,
+  Severity,
   WstgSettings,
   WstgTestDTO,
 } from "./types";
+export type { AssetQuery, CandidateQuery } from "./types";
