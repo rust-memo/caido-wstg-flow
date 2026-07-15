@@ -241,6 +241,14 @@
   background: var(--w-accent-soft);
 }
 
+.wstg-button:focus-visible,
+.wstg-tab:focus-visible,
+.wstg-row-button:focus-visible,
+.wstg-link:focus-visible {
+  outline: 2px solid #fdba74;
+  outline-offset: 2px;
+}
+
 .wstg-button.primary {
   border-color: var(--w-accent);
   color: white;
@@ -331,6 +339,10 @@
   max-height: 32rem;
 }
 
+.wstg-table-wrap.compact {
+  max-height: 18rem;
+}
+
 .wstg-table {
   width: 100%;
   border-collapse: collapse;
@@ -357,13 +369,24 @@
   text-transform: uppercase;
 }
 
-.wstg-table tbody tr {
-  cursor: pointer;
-}
-
 .wstg-table tbody tr:hover,
 .wstg-table tbody tr.selected {
   background: #f9731614;
+}
+
+.wstg-row-button {
+  padding: 0;
+  border: 0;
+  color: var(--w-text);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.wstg-row-button:hover {
+  color: #fdba74;
+  text-decoration: underline;
 }
 
 .wstg-table tbody tr.selected {
@@ -593,6 +616,54 @@
   float: right;
 }
 
+.wstg-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  color: var(--w-muted);
+  font-size: 0.68rem;
+}
+
+.wstg-dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 62%);
+}
+
+.wstg-dialog {
+  width: min(31rem, 100%);
+  padding: 1rem;
+  border: 1px solid var(--w-border);
+  border-radius: 0.6rem;
+  color: var(--w-text);
+  background: var(--w-panel);
+  box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 40%);
+}
+
+.wstg-dialog h2 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.wstg-dialog p {
+  margin: 0.65rem 0 0;
+  color: var(--w-muted);
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+.wstg-dialog .dialog-actions {
+  justify-content: flex-end;
+  margin-top: 1rem;
+  margin-bottom: 0;
+}
+
 code {
   color: #fdba74;
   font-family: "JetBrains Mono", ui-monospace, monospace;
@@ -633,4 +704,3 @@ code {
     grid-template-columns: 1fr;
   }
 }
-

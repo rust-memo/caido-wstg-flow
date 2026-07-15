@@ -1,4 +1,8 @@
 export type CandidateStatus = "NEW" | "REVIEWING" | "CONFIRMED" | "REJECTED";
+export type Severity = "Critical" | "High" | "Medium" | "Low" | "Information";
+export type Confidence = "Tentative" | "Firm" | "Confirmed";
+export type ParameterLocation =
+  "" | "QUERY" | "FORM" | "JSON" | "COOKIE" | "RESPONSE_HEADER";
 export type CheckStatus =
   "NOT_TESTED" | "IN_PROGRESS" | "PASS" | "FAIL" | "NOT_APPLICABLE";
 
@@ -45,14 +49,14 @@ export type CandidateDTO = {
   ruleId: string;
   title: string;
   category: string;
-  severity: string;
-  confidence: string;
+  severity: Severity;
+  confidence: Confidence;
   url: string;
   method: string;
   statusCode: number;
   wstgId: string;
   parameter: string;
-  location: string;
+  location: ParameterLocation;
   evidence: string;
   explanation: string;
   recommendedTest: string;
@@ -72,8 +76,8 @@ export type FindingDTO = {
   candidateId?: string;
   createdAt: string;
   title: string;
-  severity: string;
-  confidence: string;
+  severity: Severity;
+  confidence: Confidence;
   url: string;
   method: string;
   statusCode: number;
@@ -114,13 +118,63 @@ export type ScanState = {
   message: string;
 };
 
-export type Snapshot = {
+export type ProjectSummary = {
+  candidateTotal: number;
+  newCandidateCount: number;
+  findingTotal: number;
+  assetTotal: number;
+  testedCount: number;
+  passCount: number;
+  failCount: number;
+};
+
+export type Overview = {
   tests: WstgTestDTO[];
-  candidates: CandidateDTO[];
-  findings: FindingDTO[];
-  assets: AssetDTO[];
+  recentCandidates: CandidateDTO[];
+  summary: ProjectSummary;
   settings: WstgSettings;
   state: ScanState;
+};
+
+export type CandidateQuery = {
+  search: string;
+  status: "ALL" | CandidateStatus;
+  severity: "ALL" | Severity;
+  offset: number;
+  limit: number;
+};
+
+export type AssetQuery = {
+  search: string;
+  offset: number;
+  limit: number;
+};
+
+export type FindingQuery = {
+  offset: number;
+  limit: number;
+};
+
+export type Page<T> = {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+};
+
+export type DataArea = "overview" | "candidates" | "assets" | "findings";
+
+export type DataChanged = {
+  revision: number;
+  areas: DataArea[];
+};
+
+export type ReportFormat = "html" | "json" | "csv";
+
+export type ReportFile = {
+  filename: string;
+  mediaType: string;
+  content: string;
 };
 
 export type MessageDetails = {
@@ -132,7 +186,7 @@ export type MessageDetails = {
 export type AnalyzerParameter = {
   name: string;
   value: string;
-  location: string;
+  location: Exclude<ParameterLocation, "" | "RESPONSE_HEADER">;
 };
 
 export type AnalyzerInput = {
