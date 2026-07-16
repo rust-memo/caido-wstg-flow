@@ -732,6 +732,7 @@ function toAnalyzerInput(
   return {
     requestId: request.getId(),
     responseId: response.getId(),
+    responseBytes: responseRaw.toBytes().length,
     method: request.getMethod(),
     url: request.getUrl(),
     host: request.getHost(),

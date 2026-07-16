@@ -2,6 +2,22 @@
 
 All notable changes to WSTG Flow are documented here.
 
+## [1.2.0] - 2026-07-16
+
+### Added
+
+- Passive coverage derived from all 15 OWASP API Top 10 reference check families: path BOLA, JWT policy inspection, HPP, response-shape exposure, resource/business-flow review, webhook receivers, API version inventory, OpenAPI and GraphQL signals, cleartext credentials, and observed TRACE echoing.
+- High-confidence response detections for password hashes, Luhn-valid payment-card fields, and database error disclosure, with evidence redaction.
+- Negative regression tests for common parameter-name, cookie-format, JWT-response, redirect, pagination, and JavaScript-sink false positives.
+
+### Changed
+
+- Parameter candidates now require value shape, request method/location, reflection, or endpoint context instead of broad substring matches.
+- Cookie attributes are parsed case-insensitively regardless of whitespace; missing SameSite is calibrated as Tentative.
+- DOM sink detection requires a browser-controlled source in the same JavaScript asset.
+- Expected JWTs in successful JSON token responses and placeholder/documentation tokens are suppressed.
+- Asset URLs and source URLs are redacted before storage.
+
 ## [1.1.0] - 2026-07-15
 
 ### Added

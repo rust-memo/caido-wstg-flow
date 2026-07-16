@@ -65,10 +65,18 @@ describe("WSTG passive detector", () => {
       "search=test",
       "command=echo",
       "comment=hello",
-      "role=user",
     ].join("&");
+    const requestBody = '{"role":"user"}';
     const result = analyze(
-      input({ query, parameters: parseParameters(query, "", "", []) }),
+      input({
+        query,
+        method: "POST",
+        requestBody,
+        requestContentType: "application/json",
+        responseBody: "<html>hello</html>",
+        responseContentType: "text/html",
+        parameters: parseParameters(query, requestBody, "application/json", []),
+      }),
     );
     const rules = result.candidates.map((candidate) => candidate.ruleId);
     expect(rules).toEqual(
@@ -85,7 +93,8 @@ describe("WSTG passive detector", () => {
   });
 
   it("flags session material in a query URL", () => {
-    const query = "session=abcdefghijklmnop";
+    const token = "s8Dk29Lm4Pq7Vx1Z";
+    const query = `session=${token}`;
     const result = analyze(
       input({ query, parameters: parseParameters(query, "", "", []) }),
     );
@@ -93,7 +102,7 @@ describe("WSTG passive detector", () => {
       (value) => value.ruleId === "param.session_url",
     );
     expect(candidate?.payloads).toEqual([]);
-    expect(candidate?.evidence).not.toContain("abcdefghijklmnop");
+    expect(candidate?.evidence).not.toContain(token);
   });
 
   it("discovers sensitive and GraphQL routes", () => {
@@ -116,6 +125,7 @@ describe("WSTG passive detector", () => {
       input({
         headers: { Origin: ["https://attacker.test"] },
         responseContentType: "text/html",
+        responseBody: "<form><button>Transfer</button></form>",
         responseHeaders: {
           "Access-Control-Allow-Origin": ["https://attacker.test"],
           "Access-Control-Allow-Credentials": ["true"],
@@ -154,6 +164,7 @@ describe("WSTG passive detector", () => {
       ]),
     );
     expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain("10.20.30.40");
   });
 
   it("detects verbose errors and high-entropy generic tokens", () => {
@@ -174,7 +185,7 @@ describe("WSTG passive detector", () => {
         path: "/bundle.js",
         responseContentType: "text/javascript",
         responseBody:
-          'const api="https://api.example.test/v1"; el.innerHTML = value; fetch("/admin/users")',
+          'const api="https://api.example.test/v1"; const value=location.search; el.innerHTML = value; fetch("/admin/users")',
       }),
     );
     expect(result.assets.some((asset) => asset.kind === "Absolute URL")).toBe(
@@ -183,6 +194,280 @@ describe("WSTG passive detector", () => {
     expect(
       result.candidates.some((candidate) => candidate.ruleId === "js.dom_sink"),
     ).toBe(true);
+  });
+
+  it("suppresses broad name-only parameter heuristics", () => {
+    const query = "quantity=5&page=2&status=active&host=example.test";
+    const result = analyze(input({ query }));
+    const rules = result.candidates.map((candidate) => candidate.ruleId);
+    expect(rules).not.toContain("param.query");
+    expect(rules).not.toContain("param.path");
+    expect(rules).not.toContain("param.privileged");
+    expect(rules).not.toContain("param.command");
+  });
+
+  it("detects conflicting duplicate query parameters", () => {
+    const query = "role=user&role=admin";
+    const result = analyze(input({ query }));
+    expect(
+      result.candidates.some(
+        (candidate) => candidate.ruleId === "param.parameter_pollution",
+      ),
+    ).toBe(true);
+  });
+
+  it("detects path object references and legacy API inventory signals", () => {
+    const result = analyze(
+      input({ path: "/api/v0/accounts/4b2f96d4-1272-4b4f-91ad-c15abf785e31" }),
+    );
+    const rules = result.candidates.map((candidate) => candidate.ruleId);
+    expect(rules).toContain("path.object_reference");
+    expect(rules).toContain("api.deprecated_version");
+  });
+
+  it("inspects successful JWT metadata without storing the token", () => {
+    const token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.";
+    const result = analyze(
+      input({ headers: { Authorization: [`Bearer ${token}`] } }),
+    );
+    const rules = result.candidates.map((candidate) => candidate.ruleId);
+    expect(rules).toContain("auth.jwt_none");
+    expect(rules).not.toContain("auth.jwt_no_expiry");
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
+  it("keeps signed JWT expiry policy as a tentative review lead", () => {
+    const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abcdefghijklmno";
+    const result = analyze(
+      input({ headers: { Authorization: [`Bearer ${token}`] } }),
+    );
+    const candidate = result.candidates.find(
+      (value) => value.ruleId === "auth.jwt_no_expiry",
+    );
+    expect(candidate?.confidence).toBe("Tentative");
+  });
+
+  it("does not report an expected JWT in a successful JSON token response", () => {
+    const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abcdefghijklmno";
+    const result = analyze(
+      input({
+        path: "/auth/token",
+        responseBody: JSON.stringify({ access_token: token }),
+      }),
+    );
+    expect(
+      result.candidates.some((candidate) => candidate.ruleId === "secret.jwt"),
+    ).toBe(false);
+  });
+
+  it("reports cleartext credentials only when HTTP content is served", () => {
+    const served = analyze(
+      input({
+        url: "http://example.test/api/users",
+        headers: { Authorization: ["Basic dXNlcjpwYXNz"] },
+      }),
+    );
+    expect(
+      served.candidates.some(
+        (candidate) => candidate.ruleId === "header.cleartext_credentials",
+      ),
+    ).toBe(true);
+
+    const redirected = analyze(
+      input({
+        url: "http://example.test/api/users",
+        statusCode: 308,
+        headers: { Authorization: ["Basic dXNlcjpwYXNz"] },
+        responseHeaders: { Location: ["https://example.test/api/users"] },
+      }),
+    );
+    expect(
+      redirected.candidates.some(
+        (candidate) => candidate.ruleId === "header.cleartext_credentials",
+      ),
+    ).toBe(false);
+
+    const issuedCookie = analyze(
+      input({
+        url: "http://example.test/login",
+        path: "/login",
+        responseHeaders: { "Set-Cookie": ["sessionid=abc"] },
+      }),
+    );
+    expect(
+      issuedCookie.candidates.some(
+        (candidate) => candidate.ruleId === "header.cleartext_session_cookie",
+      ),
+    ).toBe(true);
+  });
+
+  it("parses compact cookie attributes without false missing-attribute reports", () => {
+    const result = analyze(
+      input({
+        responseHeaders: {
+          "Set-Cookie": ["sessionid=abc;Secure;HttpOnly;SameSite=Lax"],
+        },
+      }),
+    );
+    expect(
+      result.candidates.some((candidate) =>
+        candidate.ruleId.startsWith("cookie."),
+      ),
+    ).toBe(false);
+  });
+
+  it("detects API response-shape and definition inventory signals", () => {
+    const wideItem = Object.fromEntries(
+      Array.from({ length: 21 }, (_, index) => [`field_${index}`, index]),
+    );
+    const arrayResult = analyze(
+      input({ responseBody: JSON.stringify(Array(101).fill(wideItem)) }),
+    );
+    const arrayRules = arrayResult.candidates.map(
+      (candidate) => candidate.ruleId,
+    );
+    expect(arrayRules).toContain("api.unbounded_array");
+    expect(arrayRules).toContain("api.excessive_fields");
+
+    const definition = analyze(
+      input({
+        path: "/openapi.json",
+        responseBody: JSON.stringify({ openapi: "3.1.0", paths: {} }),
+      }),
+    );
+    expect(
+      definition.assets.some((asset) => asset.kind === "OpenAPI definition"),
+    ).toBe(true);
+    expect(
+      definition.candidates.some(
+        (candidate) => candidate.ruleId === "api.definition_exposed",
+      ),
+    ).toBe(true);
+  });
+
+  it("suppresses unbounded-array noise when pagination is visible", () => {
+    const result = analyze(
+      input({
+        query: "page=1&limit=200",
+        responseBody: JSON.stringify(Array(101).fill({ id: 1 })),
+      }),
+    );
+    expect(
+      result.candidates.some(
+        (candidate) => candidate.ruleId === "api.unbounded_array",
+      ),
+    ).toBe(false);
+  });
+
+  it("detects business-flow, webhook, and bounded resource review leads", () => {
+    const business = analyze(input({ method: "POST", path: "/api/checkout" }));
+    expect(
+      business.candidates.some(
+        (candidate) => candidate.ruleId === "api.sensitive_business_flow",
+      ),
+    ).toBe(true);
+
+    const webhook = analyze(input({ method: "POST", path: "/api/webhooks" }));
+    expect(
+      webhook.candidates.some(
+        (candidate) => candidate.ruleId === "api.webhook_receiver",
+      ),
+    ).toBe(true);
+
+    const resource = analyze(
+      input({ path: "/api/export", responseBytes: 2 * 1024 * 1024 }),
+    );
+    expect(
+      resource.candidates.some(
+        (candidate) => candidate.ruleId === "api.resource_intensive_no_limit",
+      ),
+    ).toBe(true);
+  });
+
+  it("confirms TRACE only when the saved response echoes the request", () => {
+    const requestRaw =
+      "TRACE /api/users HTTP/1.1\r\nHost: example.test\r\nX-Probe: marker\r\n\r\n";
+    const result = analyze(
+      input({
+        method: "TRACE",
+        requestRaw,
+        responseBody: requestRaw,
+        responseContentType: "message/http",
+      }),
+    );
+    const candidate = result.candidates.find(
+      (value) => value.ruleId === "header.trace_echo",
+    );
+    expect(candidate?.confidence).toBe("Confirmed");
+  });
+
+  it("inventories GraphQL introspection and batch capabilities", () => {
+    const introspection = analyze(
+      input({
+        path: "/graphql",
+        responseBody: JSON.stringify({
+          data: { __schema: { queryType: { name: "Query" } } },
+        }),
+      }),
+    );
+    expect(
+      introspection.candidates.some(
+        (candidate) => candidate.ruleId === "api.graphql_introspection",
+      ),
+    ).toBe(true);
+
+    const requestBody = JSON.stringify([
+      { query: "{ viewer { id } }" },
+      { query: "{ viewer { name } }" },
+    ]);
+    const batch = analyze(
+      input({
+        method: "POST",
+        path: "/graphql",
+        requestBody,
+        requestContentType: "application/json",
+      }),
+    );
+    expect(
+      batch.candidates.some(
+        (candidate) => candidate.ruleId === "api.graphql_batch",
+      ),
+    ).toBe(true);
+  });
+
+  it("requires a browser-controlled source as well as a DOM sink", () => {
+    const result = analyze(
+      input({
+        path: "/static.js",
+        responseContentType: "application/javascript",
+        responseBody: "element.innerHTML = trustedTemplate;",
+      }),
+    );
+    expect(
+      result.candidates.some((candidate) => candidate.ruleId === "js.dom_sink"),
+    ).toBe(false);
+  });
+
+  it("detects concrete sensitive response values while redacting evidence", () => {
+    const passwordHash =
+      "$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234";
+    const card = "4111111111111111";
+    const result = analyze(
+      input({
+        statusCode: 500,
+        responseBody: JSON.stringify({
+          password_hash: passwordHash,
+          card_number: card,
+          error: "SQLSTATE[42000] syntax error",
+        }),
+      }),
+    );
+    const rules = result.candidates.map((candidate) => candidate.ruleId);
+    expect(rules).toContain("response.password_hash");
+    expect(rules).toContain("response.payment_card");
+    expect(rules).toContain("response.sql_error");
+    expect(JSON.stringify(result)).not.toContain(card);
+    expect(JSON.stringify(result)).not.toContain(passwordHash);
   });
 
   it("parses form and cookie values and tolerates malformed encoding", () => {
@@ -208,6 +493,7 @@ function input(overrides: Partial<AnalyzerInput> = {}): AnalyzerInput {
   return {
     requestId: "request-1",
     responseId: "response-1",
+    responseBytes: 64,
     method: "GET",
     url: `https://example.test/api/users${query === "" ? "" : `?${query}`}`,
     host: "example.test",

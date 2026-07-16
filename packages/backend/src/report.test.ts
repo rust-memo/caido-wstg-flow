@@ -27,7 +27,7 @@ describe("redacted reports", () => {
   it("exports structured JSON without internal identifiers", () => {
     const file = buildReport("json", data(), "2026-07-15T10:00:00.000Z");
     const parsed = JSON.parse(file.content) as Record<string, unknown>;
-    expect(parsed.generator).toBe("Caido WSTG Flow 1.1.0");
+    expect(parsed.generator).toBe("Caido WSTG Flow 1.2.0");
     expect(file.content).not.toContain("request-1");
     expect(file.content).not.toContain("fingerprint-1");
   });

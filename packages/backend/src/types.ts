@@ -192,6 +192,7 @@ export type AnalyzerParameter = {
 export type AnalyzerInput = {
   requestId: string;
   responseId: string;
+  responseBytes: number;
   method: string;
   url: string;
   host: string;

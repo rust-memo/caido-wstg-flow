@@ -10,7 +10,7 @@ export default defineConfig({
   name: "WSTG Flow",
   description:
     "Project-aware OWASP WSTG checklist, passive candidate discovery, evidence verification, and reporting for Caido",
-  version: "1.1.0",
+  version: "1.2.0",
   author: {
     name: "rust-memo",
     email: "rust-memo@users.noreply.github.com",

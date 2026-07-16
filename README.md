@@ -2,7 +2,7 @@
 
 WSTG Flow is a project-aware OWASP Web Security Testing Guide workbench for Caido. It combines an offline 113-test WSTG checklist with bounded passive analysis of Caido HTTP History, a candidate review queue, manual A/B evidence comparison, JavaScript asset inventory, Caido Finding publication, and redacted reports.
 
-Version 1.1 adds Caido 0.57 compatibility, server-side pagination for large projects, safer scan cancellation and A/B limits, non-destructive settings, accessible confirmations, complete redacted reports, and automated release checks.
+Version 1.2 adds passive OWASP API Top 10 coverage informed by a 15-check Burp reference, stronger evidence redaction, and substantial false-positive suppression. Version 1.1 added Caido 0.57 compatibility, safer large-project handling, non-destructive settings, complete reports, and automated release checks.
 
 This is the Caido-native companion to the original Burp Suite `WSTG-Flow` extension. The Burp project remains independent and unchanged.
 
@@ -15,6 +15,8 @@ Candidates are review leads, not vulnerability verdicts. Test only systems for w
 - Bundles an offline snapshot of 113 WSTG tests, with categories, objectives, references, per-project status, notes, and candidate counts.
 - Passively analyzes scoped HTTP History and newly intercepted responses with a bounded two-worker queue.
 - Detects review candidates for access control, redirects, SSRF-like URL inputs, traversal, injection, dangerous rendering, privileged fields, GraphQL/admin routes, missing security headers, cookie attributes, secrets, verbose errors, internal addresses, and risky JavaScript patterns.
+- Adds passive OWASP API Top 10 coverage for path and parameter BOLA leads, JWT metadata, mass-assignment fields, conflicting duplicate parameters, business-flow automation, resource consumption, API inventory/versioning, webhook receivers, OpenAPI documents, GraphQL introspection/batching, excessive response shape, and observed TRACE echoing.
+- Applies evidence gates designed to reduce false positives: identifier/value shape checks, modifying-method requirements, exact path segments, successful non-rejection responses, pagination and rate-limit suppression, HTML-only reflection, DOM source-plus-sink correlation, syntactic cookie attributes, Luhn validation, and placeholder/documentation filtering.
 - Extracts JavaScript endpoints, source-map references, and script assets from traffic already present in Caido; it does not fetch assets itself.
 - Deduplicates candidates, records occurrence counts, supports review states and WSTG remapping, and persists data separately for each Caido project.
 - Uses bounded server-side candidate, finding, and asset pages so large projects do not send the full data set after every analyzed response.
@@ -74,9 +76,9 @@ The loadable package is created at `dist/plugin_package.zip`.
 - Reports redact common credentials and secret parameter patterns and omit internal candidate fingerprints and Request IDs.
 - Saving Settings is non-destructive. The explicit rebuild action clears only unconfirmed candidates; confirmed findings and checklist progress are retained.
 
-## Upgrading from 1.0
+## Upgrading
 
-Install the 1.1 package over the existing plugin. The database migration is idempotent and retains checklist progress, candidates, evidence links, findings, assets, and Settings. No automatic candidate rebuild is performed during upgrade. Caido 0.57 or newer is required.
+Install the 1.2 package over version 1.0 or 1.1. The database migration is idempotent and retains checklist progress, candidates, evidence links, findings, assets, and Settings. Use the explicit rebuild action if you want existing History re-evaluated under the stricter 1.2 detector rules; no automatic candidate rebuild is performed during upgrade. Caido 0.57 or newer is required.
 
 ## Release verification
 
@@ -91,6 +93,12 @@ Release tags are created only after type checking, coverage tests, linting, unus
 ## Burp-to-Caido differences
 
 The Caido release preserves the original checklist, passive discovery, candidate review, assets, evidence comparison, reports, payload suggestions, and confirmed-finding workflow using Caido-native History, Replay, SQLite, events, and Findings APIs. The first Caido release does not import Burp Scanner issues, execute probes automatically, use the Burp AI API, or import Burp-specific rule packs. These platform-specific features are intentionally not emulated.
+
+## API check reference and confidence model
+
+The OWASP API Top 10 expansion was informed by the 15-check OWASP API Security Top 10 Scanner snapshot at `github.com/liam-portswigger/burp-api-scanner`, commit `5b73ce3c9415a3dde09527b857cea74a44c2bc70` (2026-07-14). Its check families were adapted to Caido's passive-only safety model; WSTG Flow does not send the active probes used by the Burp extension.
+
+Observed self-proving evidence such as an echoed TRACE request is **Confirmed**. Exact disclosures and response characteristics are normally **Firm**. A path, field name, missing header, token policy, or manual Replay lead remains **Tentative** even when useful. In particular, HMAC-signed JWTs, Basic Authentication over HTTPS, CORS wildcard on public data, and the absence of rate-limit headers are not treated as vulnerabilities on their own.
 
 ## الاستخدام السريع بالعربية
 
